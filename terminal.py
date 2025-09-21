@@ -54,7 +54,7 @@ class Terminal:
     def complete_command(self, text, state):
         """Auto-completion for commands"""
         commands = [
-            'ls', 'cd', 'pwd', 'mkdir', 'rm', 'cp', 'mv', 'cat', 'echo',
+            'ls', 'cd', 'pwd', 'mkdir', 'rm', 'rmdir', 'cp', 'mv', 'cat', 'echo',
             'ps', 'top', 'mem', 'cpu', 'df', 'du', 'find', 'grep',
             'history', 'clear', 'exit', 'help', 'ai'
         ]
@@ -71,6 +71,18 @@ class Terminal:
             if command.strip() and command not in self.command_history[-1:]:
                 self.command_history.append(command)
                 readline.add_history(command)
+            
+            # Handle command chaining with &&
+            if ' && ' in command:
+                commands = command.split(' && ')
+                results = []
+                for cmd in commands:
+                    result = self.execute_command(cmd.strip())
+                    results.append(result)
+                    # If any command fails, stop execution
+                    if "Error:" in result:
+                        break
+                return '\n'.join(results)
             
             # Parse command
             parts = command.strip().split()
@@ -91,6 +103,8 @@ class Terminal:
                 return self.cmd_mkdir(args)
             elif cmd == 'rm':
                 return self.cmd_rm(args)
+            elif cmd == 'rmdir':
+                return self.cmd_rmdir(args)
             elif cmd == 'cp':
                 return self.cmd_cp(args)
             elif cmd == 'mv':
@@ -273,6 +287,28 @@ class Terminal:
         
         return '\n'.join(results)
     
+    def cmd_rmdir(self, args: List[str]) -> str:
+        """Remove empty directories"""
+        if not args:
+            return "Error: rmdir requires directory name"
+        
+        results = []
+        for dir_name in args:
+            try:
+                if os.path.isdir(dir_name):
+                    # Check if directory is empty
+                    if not os.listdir(dir_name):
+                        os.rmdir(dir_name)
+                        results.append(f"Removed directory: {dir_name}")
+                    else:
+                        results.append(f"Error: Directory '{dir_name}' is not empty (use 'rm -r' to remove non-empty directories)")
+                else:
+                    results.append(f"Error: '{dir_name}' is not a directory")
+            except Exception as e:
+                results.append(f"Error removing directory '{dir_name}': {str(e)}")
+        
+        return '\n'.join(results)
+    
     def cmd_cp(self, args: List[str]) -> str:
         """Copy files or directories"""
         if len(args) < 2:
@@ -336,15 +372,28 @@ class Terminal:
             return ""
         
         # Handle redirection
-        if '>' in args:
+        if '>>' in ' '.join(args):
+            # Append mode
+            parts = ' '.join(args).split('>>')
+            if len(parts) == 2:
+                text = parts[0].strip()
+                filename = parts[1].strip()
+                try:
+                    with open(filename, 'a', encoding='utf-8') as f:
+                        f.write(text + '\n')
+                    return f"Appended to {filename}"
+                except Exception as e:
+                    return f"Error appending to {filename}: {str(e)}"
+        elif '>' in args:
+            # Write mode
             try:
                 redirect_idx = args.index('>')
                 text = ' '.join(args[:redirect_idx])
                 filename = args[redirect_idx + 1]
                 
-                with open(filename, 'w') as f:
-                    f.write(text)
-                return text
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(text + '\n')
+                return f"Written to {filename}"
             except Exception as e:
                 return f"Error: {str(e)}"
         else:
@@ -354,15 +403,29 @@ class Terminal:
         """List running processes"""
         try:
             processes = []
+            python_processes = []
+            
             for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
                 try:
                     pinfo = proc.info
-                    processes.append(f"{pinfo['pid']:>6} {pinfo['name']:<20} {pinfo['cpu_percent']:>6.1f}% {pinfo['memory_percent']:>6.1f}%")
+                    process_line = f"{pinfo['pid']:>6} {pinfo['name']:<20} {pinfo['cpu_percent']:>6.1f}% {pinfo['memory_percent']:>6.1f}%"
+                    
+                    # Prioritize Python processes
+                    if 'python' in pinfo['name'].lower():
+                        python_processes.append(process_line)
+                    else:
+                        processes.append(process_line)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             
+            # Show Python processes first, then others
+            all_processes = python_processes + processes
+            
+            if not all_processes:
+                return "No processes found"
+            
             header = f"{'PID':>6} {'NAME':<20} {'CPU%':>6} {'MEM%':>6}"
-            return header + '\n' + '\n'.join(processes[:20])  # Show top 20 processes
+            return header + '\n' + '\n'.join(all_processes[:20])  # Show top 20 processes
         except Exception as e:
             return f"Error: {str(e)}"
     
@@ -434,9 +497,20 @@ class Terminal:
             result = ["Filesystem Usage:"]
             for partition in psutil.disk_partitions():
                 try:
-                    usage = psutil.disk_usage(partition.mountpoint)
-                    result.append(f"  {partition.device:<20} {self.format_size(usage.total):>8} {self.format_size(usage.used):>8} {self.format_size(usage.free):>8} {usage.percent:>5.1f}% {partition.mountpoint}")
-                except PermissionError:
+                    # Use shutil.disk_usage instead of psutil.disk_usage for Windows compatibility
+                    import shutil
+                    usage = shutil.disk_usage(partition.mountpoint)
+                    device = partition.device.replace('\\', '/')
+                    total = self.format_size(usage.total)
+                    used = self.format_size(usage.used)
+                    free = self.format_size(usage.free)
+                    percent = str(round((usage.used / usage.total) * 100, 1)) + "%"
+                    mountpoint = partition.mountpoint.replace('\\', '/')
+                    
+                    # Simple string concatenation
+                    line = "  " + device.ljust(20) + " " + total.rjust(8) + " " + used.rjust(8) + " " + free.rjust(8) + " " + percent.rjust(5) + " " + mountpoint
+                    result.append(line)
+                except (PermissionError, OSError):
                     pass
             return '\n'.join(result)
         except Exception as e:
@@ -472,11 +546,19 @@ class Terminal:
         directory = args[1] if len(args) > 1 else "."
         
         try:
+            import glob
             matches = []
-            for root, dirs, files in os.walk(directory):
-                for file in files:
-                    if pattern in file:
-                        matches.append(os.path.join(root, file))
+            
+            # Handle glob patterns
+            if '*' in pattern or '?' in pattern:
+                search_pattern = os.path.join(directory, pattern)
+                matches = glob.glob(search_pattern, recursive=True)
+            else:
+                # Simple string matching
+                for root, dirs, files in os.walk(directory):
+                    for file in files:
+                        if pattern in file:
+                            matches.append(os.path.join(root, file))
             
             return '\n'.join(matches) if matches else f"No files found matching '{pattern}'"
         except Exception as e:
@@ -527,6 +609,7 @@ Available Commands:
     pwd                    - Print working directory
     mkdir <dir>            - Create directory
     rm [options] <file>    - Remove file/directory (-r: recursive, -f: force)
+    rmdir <dir>            - Remove empty directory
     cp [options] <src> <dest> - Copy file/directory (-r: recursive)
     mv <src> <dest>        - Move/rename file/directory
     cat <file>             - Display file contents
