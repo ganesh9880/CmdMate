@@ -34,6 +34,15 @@ def index():
     """Main terminal page"""
     return render_template('terminal.html')
 
+@app.route('/health')
+def health_check():
+    """Health check endpoint for deployment platforms"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'CmdMate Terminal',
+        'version': '1.0.0'
+    }), 200
+
 @app.route('/execute', methods=['POST'])
 def execute_command():
     """Execute a command and return the output"""
